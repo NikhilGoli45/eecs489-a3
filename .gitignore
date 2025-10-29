@@ -1,0 +1,40 @@
+# CMake build directories
+cpp/build/
+
+# CMake cache files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Compiled object files
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+
+# Executables
+*.exe
+bin/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Editor backup files
+*.bak
+*.tmp
+
+# Dependency directories
+_deps/
+
