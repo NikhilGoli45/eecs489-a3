@@ -5,11 +5,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-struct SenderEndpoint {
-    int fd;
-    sockaddr_storage peer;
-    socklen_t peer_len;
-};
+#include "sockets.h"
 
 std::optional<SenderEndpoint> start_sender_socket(const std::string& hostname, int port) {
     addrinfo hints{};

@@ -8,6 +8,8 @@
 #include <cstring>
 #include <chrono>
 
+#include "sockets.h"
+
 static uint32_t compute_checksum(PacketHeader header) {
     return crc32(&header, sizeof(PacketHeader));
 }
@@ -37,7 +39,7 @@ int main(int argc, char** argv) {
     const std::string hostname = result["hostname"].as<std::string>();
     const int port = result["port"].as<int>();
 
-    
+
     
     return 0;
 }

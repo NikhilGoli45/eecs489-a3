@@ -13,7 +13,8 @@
 cmake_minimum_required(VERSION 3.28)
 
 # Add the executable for wSender
-add_executable(wSender wSender.cpp)
+add_executable(wSender)
+target_sources(wSender PRIVATE wSender.cpp sockets.cpp)
 
 # Headers in common
 target_include_directories(wSender PRIVATE ../${CMAKE_CURRENT_SOURCE_DIR}/common)
