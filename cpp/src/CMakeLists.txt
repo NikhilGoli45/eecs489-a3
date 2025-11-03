@@ -21,3 +21,16 @@ target_include_directories(wSender PRIVATE ../${CMAKE_CURRENT_SOURCE_DIR}/common
 
 #link deps fetched in top-level CMakeLists.txt
 target_link_libraries(wSender PRIVATE spdlog::spdlog cxxopts::cxxopts)
+
+
+add_executable(wReceiver
+    wReceiver.cpp
+)
+
+target_include_directories(wReceiver PRIVATE
+    ${PROJECT_SOURCE_DIR}/common
+)
+
+target_link_libraries(wReceiver PRIVATE
+    spdlog::spdlog
+)
