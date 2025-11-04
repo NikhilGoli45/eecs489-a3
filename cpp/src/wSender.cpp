@@ -7,12 +7,17 @@
 #include <unistd.h>
 #include <cstring>
 #include <chrono>
+#include <optional>
+#include <fstream>
+#include <vector>
+#include <array>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <iostream>
 
 #include "sockets.h"
-
-static uint32_t compute_checksum(PacketHeader header) {
-    return crc32(&header, sizeof(PacketHeader));
-}
+#include "common/Crc32.hpp"
+#include "common/PacketHeader.hpp"
 
 struct OutPkt {
     PacketHeader hdr;
@@ -50,12 +55,19 @@ int main(int argc, char** argv) {
 
     std::ofstream logf(logPath, std::ios::out | std::ios::app);
 
-    auto epOpt = start_sender_socket(hostname, port);
+    auto epOpt = start_sender_socket(hostname, port, logf);
     if (!epOpt) {
         spdlog::error("Failed to start sender socket");
         return 1;
     }
     SenderEndpoint ep = *epOpt;
+    uint32_t startSeqNum = ep.startSeqNum;
+    
+    // Remove socket timeout for main loop (we'll use our own timer)
+    timeval no_timeout{};
+    no_timeout.tv_sec = 0;
+    no_timeout.tv_usec = 0;
+    setsockopt(ep.fd, SOL_SOCKET, SO_RCVTIMEO, &no_timeout, sizeof(no_timeout));
 
     std::ifstream in(inputPath, std::ios::binary);
     if (!in) {
@@ -91,7 +103,7 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> readBuf(maxPayload);
 
     while (true) {
-        while (!eofReached && (nextSeq - base) < static_cast<uint32_t>(window_size)) {
+        while (!eofReached && (nextSeq - baseSeqNum) < static_cast<uint32_t>(window_size)) {
             in.read(reinterpret_cast<char*>(readBuf.data()), readBuf.size());
             std::streamsize n = in.gcount();
             if (n <= 0) {
@@ -104,7 +116,7 @@ int main(int argc, char** argv) {
             pkt.hdr.type = 2;
             pkt.hdr.seqNum = nextSeq;
             pkt.hdr.length = static_cast<uint32_t>(n);
-            pkt.hdr.checksum = compute_checksum_data(pkt.payload.data(), pkt.payload.size());
+            pkt.hdr.checksum = crc32(pkt.payload.data(), pkt.payload.size());
             
             if (window.size() < (nextSeq - baseSeqNum + 1)) {
                 window.resize(nextSeq - baseSeqNum + 1);
@@ -124,40 +136,11 @@ int main(int argc, char** argv) {
             break;
         }
 
-        PacketHeader ack{};
-        sockaddr_storage from{};
-        socklen_t fromlen = sizeof(from);
-        ssize_t n = recvfrom(ep.fd, &ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&from), &fromlen);
-        bool windowAdvanced = false;
-
-        if (n >= static_cast<ssize_t>(sizeof(PacketHeader)) && ack.type == 3) {
-
-            logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
-            logf.flush();
-
-            if (ack.seqNum > base && ack.seqNum <= nextSeq) {
-                size_t drop = static_cast<size_t>(ack.seqNum - base);
-                if (drop <= window.size()) {
-                    window.erase(window.begin(), window.begin() + drop);
-                } else {
-                    window.clear();
-                }
-                baseSeqNum = ack.seqNum;
-                windowAdvanced = true;
-
-                if (base == nextSeq) {
-                    timerRunning = false;
-                } else {
-                    timerStart = std::chrono::steady_clock::now();
-                    timerRunning = true;
-                }
-            }
-        }
-
+        // Check timer and retransmit if needed
         if (timerRunning) {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - timerStart).count();
-            if (!windowAdvanced && elapsed >= 500) {
+            if (elapsed >= 500) {
                 // retransmit all packets in current window
                 for (size_t i = 0; i < window.size(); ++i) {
                     send_packet(window[i]);
@@ -166,11 +149,53 @@ int main(int argc, char** argv) {
                 timerStart = std::chrono::steady_clock::now();
             }
         }
+
+        // Check for incoming ACK with select (non-blocking check)
+        fd_set readfds;
+        struct timeval select_timeout;
+        FD_ZERO(&readfds);
+        FD_SET(ep.fd, &readfds);
+        select_timeout.tv_sec = 0;
+        select_timeout.tv_usec = 50000; // 50ms - allows timer check while waiting for ACK
+        
+        int select_result = select(ep.fd + 1, &readfds, nullptr, nullptr, &select_timeout);
+        bool windowAdvanced = false;
+        
+        if (select_result > 0 && FD_ISSET(ep.fd, &readfds)) {
+            PacketHeader ack{};
+            sockaddr_storage from{};
+            socklen_t fromlen = sizeof(from);
+            ssize_t n = recvfrom(ep.fd, &ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&from), &fromlen);
+
+            if (n >= static_cast<ssize_t>(sizeof(PacketHeader)) && ack.type == 3) {
+
+                logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
+                logf.flush();
+
+                if (ack.seqNum > baseSeqNum && ack.seqNum <= nextSeq) {
+                    size_t drop = static_cast<size_t>(ack.seqNum - baseSeqNum);
+                    if (drop <= window.size()) {
+                        window.erase(window.begin(), window.begin() + drop);
+                    } else {
+                        window.clear();
+                    }
+                    baseSeqNum = ack.seqNum;
+                    windowAdvanced = true;
+
+                    if (baseSeqNum == nextSeq) {
+                        timerRunning = false;
+                    } else {
+                        timerStart = std::chrono::steady_clock::now();
+                        timerRunning = true;
+                    }
+                }
+            }
+        }
     }
 
     PacketHeader end{};
     end.type = 1;
-    end.seqNum = 0;
+    end.seqNum = startSeqNum;  // END must use same seqNum as START
     end.length = 0;
     end.checksum = 0;
 

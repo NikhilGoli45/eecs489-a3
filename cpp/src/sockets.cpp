@@ -4,10 +4,14 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <random>
+#include <climits>
+#include <cstdint>
 
 #include "sockets.h"
+#include "common/PacketHeader.hpp"
 
-std::optional<SenderEndpoint> start_sender_socket(const std::string& hostname, int port) {
+std::optional<SenderEndpoint> start_sender_socket(const std::string& hostname, int port, std::ofstream& logf) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
@@ -40,11 +44,18 @@ std::optional<SenderEndpoint> start_sender_socket(const std::string& hostname, i
     std::memcpy(&ep.peer, result->ai_addr, result->ai_addrlen);
     freeaddrinfo(result);
 
+    // Generate random seqNum for START packet
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<uint32_t> dis(1, UINT32_MAX);
+    uint32_t startSeqNum = dis(gen);
+
     PacketHeader start{};
     start.type = 0;
-    start.seqNum = 0;
+    start.seqNum = startSeqNum;
     start.length = 0;
     start.checksum = 0;
+    ep.startSeqNum = startSeqNum;
 
     for (;;) {
         ssize_t sent = sendto(ep.fd, &start, sizeof(start), 0, reinterpret_cast<sockaddr*>(&ep.peer), ep.peer_len);
@@ -52,6 +63,9 @@ std::optional<SenderEndpoint> start_sender_socket(const std::string& hostname, i
             spdlog::warn("Failed to send START: {}", strerror(errno));
         } else {
             spdlog::debug("SENT START: {} {} {} {}", start.type, start.seqNum, start.length, start.checksum);
+            // Log START packet to log file
+            logf << start.type << " " << start.seqNum << " " << start.length << " " << start.checksum << "\n";
+            logf.flush();
         }
 
         PacketHeader ack{};
@@ -66,6 +80,9 @@ std::optional<SenderEndpoint> start_sender_socket(const std::string& hostname, i
         }
         if (ack.type == 3 && ack.seqNum == start.seqNum) {
             spdlog::debug("RECV ACK: {} {} {} {}", ack.type, ack.seqNum, ack.length, ack.checksum);
+            // Log ACK packet to log file
+            logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
+            logf.flush();
             break;
         }
         spdlog::debug("Ignoring non-START-ACK (type {}, seq {})", ack.type, ack.seqNum);
