@@ -63,7 +63,6 @@ int main(int argc, char** argv) {
     SenderEndpoint ep = *epOpt;
     uint32_t startSeqNum = ep.startSeqNum;
     
-    // Remove socket timeout for main loop (we'll use our own timer)
     timeval no_timeout{};
     no_timeout.tv_sec = 0;
     no_timeout.tv_usec = 0;
@@ -150,13 +149,13 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Check for incoming ACK with select (non-blocking check)
+        // Check for incoming ACK with select
         fd_set readfds;
         struct timeval select_timeout;
         FD_ZERO(&readfds);
         FD_SET(ep.fd, &readfds);
         select_timeout.tv_sec = 0;
-        select_timeout.tv_usec = 50000; // 50ms - allows timer check while waiting for ACK
+        select_timeout.tv_usec = 50000;
         
         int select_result = select(ep.fd + 1, &readfds, nullptr, nullptr, &select_timeout);
         bool windowAdvanced = false;
