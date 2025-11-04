@@ -14,6 +14,11 @@ static uint32_t compute_checksum(PacketHeader header) {
     return crc32(&header, sizeof(PacketHeader));
 }
 
+struct OutPkt {
+    PacketHeader hdr;
+    std::vector<uint8_t> payload;
+};
+
 int main(int argc, char** argv) {
     
     cxxopts::Options options("wSender", "A simple reliable transport protocol");
@@ -39,7 +44,153 @@ int main(int argc, char** argv) {
     const std::string hostname = result["hostname"].as<std::string>();
     const int port = result["port"].as<int>();
 
+    const int window_size = result["window-size"].as<int>();
+    const std::string inputPath = result["input-file"].as<std::string>();
+    const std::string logPath = result["output-log"].as<std::string>();
 
-    
+    std::ofstream logf(logPath, std::ios::out | std::ios::app);
+
+    auto epOpt = start_sender_socket(hostname, port);
+    if (!epOpt) {
+        spdlog::error("Failed to start sender socket");
+        return 1;
+    }
+    SenderEndpoint ep = *epOpt;
+
+    std::ifstream in(inputPath, std::ios::binary);
+    if (!in) {
+        spdlog::error("Failed to open input file: {}", inputPath);
+        return 1;
+    }
+
+    const size_t maxPacketBytes = 1472;
+    const size_t maxPayload = maxPacketBytes - sizeof(PacketHeader);
+
+    uint32_t baseSeqNum = 0;
+    uint32_t nextSeq = 0;
+    bool timerRunning = false;
+    auto timerStart = std::chrono::steady_clock::now();
+
+    std::vector<OutPkt> window;
+
+    auto send_packet = [&](const OutPkt& p) {
+        std::array<uint8_t, 1472> buf{};
+        std::memcpy(buf.data(), &p.hdr, sizeof(PacketHeader));
+        if (!p.payload.empty()) {
+            std::memcpy(buf.data() + sizeof(PacketHeader), p.payload.data(), p.payload.size());
+        }
+        const size_t total = sizeof(PacketHeader) + p.payload.size();
+        ssize_t sent = sendto(ep.fd, buf.data(), total, 0, reinterpret_cast<sockaddr*>(&ep.peer), ep.peer_len);
+        (void)sent;
+
+        logf << p.hdr.type << " " << p.hdr.seqNum << " " << p.hdr.length << " " << p.hdr.checksum << "\n";
+        logf.flush();
+    };
+
+    bool eofReached = false;
+    std::vector<uint8_t> readBuf(maxPayload);
+
+    while (true) {
+        while (!eofReached && (nextSeq - base) < static_cast<uint32_t>(window_size)) {
+            in.read(reinterpret_cast<char*>(readBuf.data()), readBuf.size());
+            std::streamsize n = in.gcount();
+            if (n <= 0) {
+                eofReached = true;
+                break;
+            }
+
+            OutPkt pkt{};
+            pkt.payload.assign(readBuf.begin(), readBuf.begin() + n);
+            pkt.hdr.type = 2;
+            pkt.hdr.seqNum = nextSeq;
+            pkt.hdr.length = static_cast<uint32_t>(n);
+            pkt.hdr.checksum = compute_checksum_data(pkt.payload.data(), pkt.payload.size());
+            
+            if (window.size() < (nextSeq - baseSeqNum + 1)) {
+                window.resize(nextSeq - baseSeqNum + 1);
+            }
+            window[nextSeq - baseSeqNum] = pkt;
+
+            send_packet(pkt);
+
+            if (!timerRunning) {
+                timerRunning = true;
+                timerStart = std::chrono::steady_clock::now();
+            }
+            nextSeq++;
+        }
+
+        if (eofReached && baseSeqNum == nextSeq) {
+            break;
+        }
+
+        PacketHeader ack{};
+        sockaddr_storage from{};
+        socklen_t fromlen = sizeof(from);
+        ssize_t n = recvfrom(ep.fd, &ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&from), &fromlen);
+        bool windowAdvanced = false;
+
+        if (n >= static_cast<ssize_t>(sizeof(PacketHeader)) && ack.type == 3) {
+
+            logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
+            logf.flush();
+
+            if (ack.seqNum > base && ack.seqNum <= nextSeq) {
+                size_t drop = static_cast<size_t>(ack.seqNum - base);
+                if (drop <= window.size()) {
+                    window.erase(window.begin(), window.begin() + drop);
+                } else {
+                    window.clear();
+                }
+                baseSeqNum = ack.seqNum;
+                windowAdvanced = true;
+
+                if (base == nextSeq) {
+                    timerRunning = false;
+                } else {
+                    timerStart = std::chrono::steady_clock::now();
+                    timerRunning = true;
+                }
+            }
+        }
+
+        if (timerRunning) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - timerStart).count();
+            if (!windowAdvanced && elapsed >= 500) {
+                // retransmit all packets in current window
+                for (size_t i = 0; i < window.size(); ++i) {
+                    send_packet(window[i]);
+                }
+                // reset timer
+                timerStart = std::chrono::steady_clock::now();
+            }
+        }
+    }
+
+    PacketHeader end{};
+    end.type = 1;
+    end.seqNum = 0;
+    end.length = 0;
+    end.checksum = 0;
+
+    for(;;) {
+        ssize_t sent = sendto(ep.fd, &end, sizeof(end), 0, reinterpret_cast<sockaddr*>(&ep.peer), ep.peer_len);
+        (void)sent;
+        logf << end.type << " " << end.seqNum << " " << end.length << " " << end.checksum << "\n";
+        logf.flush();
+
+        PacketHeader ack{};
+        sockaddr_storage from{};
+        socklen_t fromlen = sizeof(from);
+        ssize_t n = recvfrom(ep.fd, &ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&from), &fromlen);
+        if (n >= static_cast<ssize_t>(sizeof(PacketHeader)) && ack.type == 3 && ack.seqNum == end.seqNum) {
+            logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
+            logf.flush();
+            break;
+        }
+    }
+
+    close(ep.fd);
     return 0;
 }
