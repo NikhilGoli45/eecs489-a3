@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -108,7 +109,15 @@ static void send_ack(int sockfd,
     ack.length = 0;   // no payload
     ack.checksum = 0; // not used
 
-    (void)sendto(sockfd, &ack, sizeof(ack), 0,
+    // Convert ACK packet header to little-endian before sending
+    std::array<uint8_t, sizeof(PacketHeader)> ackBuf{};
+    uint32_t* ack_fields = reinterpret_cast<uint32_t*>(ackBuf.data());
+    ack_fields[0] = htole32(ack.type);
+    ack_fields[1] = htole32(ack.seqNum);
+    ack_fields[2] = htole32(ack.length);
+    ack_fields[3] = htole32(ack.checksum);
+    
+    (void)sendto(sockfd, ackBuf.data(), sizeof(PacketHeader), 0,
                  reinterpret_cast<const sockaddr*>(&to), sizeof(to));
     log_packet(logFile, ack);
 }
@@ -184,6 +193,13 @@ int main(int argc, char** argv) {
 
         PacketHeader hdr{};
         std::memcpy(&hdr, buf.data(), sizeof(PacketHeader));
+        
+        // Convert received packet header from little-endian to host byte order
+        uint32_t* hdr_fields = reinterpret_cast<uint32_t*>(&hdr);
+        hdr.type = le32toh(hdr_fields[0]);
+        hdr.seqNum = le32toh(hdr_fields[1]);
+        hdr.length = le32toh(hdr_fields[2]);
+        hdr.checksum = le32toh(hdr_fields[3]);
 
         if (sizeof(PacketHeader) + hdr.length != static_cast<size_t>(n)) {
             // Malformed length → drop silently

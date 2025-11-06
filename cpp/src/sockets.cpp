@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <array>
 #include <random>
 #include <climits>
 #include <cstdint>
@@ -58,8 +59,16 @@ std::optional<SenderEndpoint> start_sender_socket(const std::string& hostname, i
     ep.startSeqNum = startSeqNum;
 
     for (;;) {
-        ssize_t sent = sendto(ep.fd, &start, sizeof(start), 0, reinterpret_cast<sockaddr*>(&ep.peer), ep.peer_len);
-        if (sent != sizeof(start)) {
+        // Convert START packet header to little-endian before sending
+        std::array<uint8_t, sizeof(PacketHeader)> startBuf{};
+        uint32_t* start_fields = reinterpret_cast<uint32_t*>(startBuf.data());
+        start_fields[0] = htole32(start.type);
+        start_fields[1] = htole32(start.seqNum);
+        start_fields[2] = htole32(start.length);
+        start_fields[3] = htole32(start.checksum);
+        
+        ssize_t sent = sendto(ep.fd, startBuf.data(), sizeof(PacketHeader), 0, reinterpret_cast<sockaddr*>(&ep.peer), ep.peer_len);
+        if (sent != sizeof(PacketHeader)) {
             spdlog::warn("Failed to send START: {}", strerror(errno));
         } else {
             spdlog::debug("SENT START: {} {} {} {}", start.type, start.seqNum, start.length, start.checksum);
@@ -78,12 +87,21 @@ std::optional<SenderEndpoint> start_sender_socket(const std::string& hostname, i
             close(ep.fd);
             return std::nullopt;
         }
-        if (ack.type == 3 && ack.seqNum == start.seqNum) {
-            spdlog::debug("RECV ACK: {} {} {} {}", ack.type, ack.seqNum, ack.length, ack.checksum);
-            // Log ACK packet to log file
-            logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
-            logf.flush();
-            break;
+        if (n >= static_cast<ssize_t>(sizeof(PacketHeader))) {
+            // Convert received ACK header from little-endian to host byte order
+            uint32_t* ack_fields = reinterpret_cast<uint32_t*>(&ack);
+            ack.type = le32toh(ack_fields[0]);
+            ack.seqNum = le32toh(ack_fields[1]);
+            ack.length = le32toh(ack_fields[2]);
+            ack.checksum = le32toh(ack_fields[3]);
+            
+            if (ack.type == 3 && ack.seqNum == start.seqNum) {
+                spdlog::debug("RECV ACK: {} {} {} {}", ack.type, ack.seqNum, ack.length, ack.checksum);
+                // Log ACK packet to log file
+                logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
+                logf.flush();
+                break;
+            }
         }
         spdlog::debug("Ignoring non-START-ACK (type {}, seq {})", ack.type, ack.seqNum);
     }

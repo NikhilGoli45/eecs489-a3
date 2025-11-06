@@ -86,7 +86,12 @@ int main(int argc, char** argv) {
 
     auto send_packet = [&](const OutPkt& p) {
         std::array<uint8_t, 1472> buf{};
-        std::memcpy(buf.data(), &p.hdr, sizeof(PacketHeader));
+        // Convert header fields to little-endian before sending
+        uint32_t* hdr_fields = reinterpret_cast<uint32_t*>(buf.data());
+        hdr_fields[0] = htole32(p.hdr.type);
+        hdr_fields[1] = htole32(p.hdr.seqNum);
+        hdr_fields[2] = htole32(p.hdr.length);
+        hdr_fields[3] = htole32(p.hdr.checksum);
         if (!p.payload.empty()) {
             std::memcpy(buf.data() + sizeof(PacketHeader), p.payload.data(), p.payload.size());
         }
@@ -111,6 +116,8 @@ int main(int argc, char** argv) {
             }
 
             OutPkt pkt{};
+            // Explicitly zero-initialize header
+            pkt.hdr = PacketHeader{};
             pkt.payload.assign(readBuf.begin(), readBuf.begin() + n);
             pkt.hdr.type = 2;
             pkt.hdr.seqNum = nextSeq;
@@ -166,26 +173,34 @@ int main(int argc, char** argv) {
             socklen_t fromlen = sizeof(from);
             ssize_t n = recvfrom(ep.fd, &ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&from), &fromlen);
 
-            if (n >= static_cast<ssize_t>(sizeof(PacketHeader)) && ack.type == 3) {
+            if (n >= static_cast<ssize_t>(sizeof(PacketHeader))) {
+                // Convert received ACK header from little-endian to host byte order
+                uint32_t* ack_fields = reinterpret_cast<uint32_t*>(&ack);
+                ack.type = le32toh(ack_fields[0]);
+                ack.seqNum = le32toh(ack_fields[1]);
+                ack.length = le32toh(ack_fields[2]);
+                ack.checksum = le32toh(ack_fields[3]);
+                
+                if (ack.type == 3) {
+                    logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
+                    logf.flush();
 
-                logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
-                logf.flush();
+                    if (ack.seqNum > baseSeqNum && ack.seqNum <= nextSeq) {
+                        size_t drop = static_cast<size_t>(ack.seqNum - baseSeqNum);
+                        if (drop <= window.size()) {
+                            window.erase(window.begin(), window.begin() + drop);
+                        } else {
+                            window.clear();
+                        }
+                        baseSeqNum = ack.seqNum;
+                        windowAdvanced = true;
 
-                if (ack.seqNum > baseSeqNum && ack.seqNum <= nextSeq) {
-                    size_t drop = static_cast<size_t>(ack.seqNum - baseSeqNum);
-                    if (drop <= window.size()) {
-                        window.erase(window.begin(), window.begin() + drop);
-                    } else {
-                        window.clear();
-                    }
-                    baseSeqNum = ack.seqNum;
-                    windowAdvanced = true;
-
-                    if (baseSeqNum == nextSeq) {
-                        timerRunning = false;
-                    } else {
-                        timerStart = std::chrono::steady_clock::now();
-                        timerRunning = true;
+                        if (baseSeqNum == nextSeq) {
+                            timerRunning = false;
+                        } else {
+                            timerStart = std::chrono::steady_clock::now();
+                            timerRunning = true;
+                        }
                     }
                 }
             }
@@ -199,7 +214,15 @@ int main(int argc, char** argv) {
     end.checksum = 0;
 
     for(;;) {
-        ssize_t sent = sendto(ep.fd, &end, sizeof(end), 0, reinterpret_cast<sockaddr*>(&ep.peer), ep.peer_len);
+        // Convert END packet header to little-endian before sending
+        std::array<uint8_t, sizeof(PacketHeader)> endBuf{};
+        uint32_t* end_fields = reinterpret_cast<uint32_t*>(endBuf.data());
+        end_fields[0] = htole32(end.type);
+        end_fields[1] = htole32(end.seqNum);
+        end_fields[2] = htole32(end.length);
+        end_fields[3] = htole32(end.checksum);
+        
+        ssize_t sent = sendto(ep.fd, endBuf.data(), sizeof(PacketHeader), 0, reinterpret_cast<sockaddr*>(&ep.peer), ep.peer_len);
         (void)sent;
         logf << end.type << " " << end.seqNum << " " << end.length << " " << end.checksum << "\n";
         logf.flush();
@@ -208,10 +231,19 @@ int main(int argc, char** argv) {
         sockaddr_storage from{};
         socklen_t fromlen = sizeof(from);
         ssize_t n = recvfrom(ep.fd, &ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&from), &fromlen);
-        if (n >= static_cast<ssize_t>(sizeof(PacketHeader)) && ack.type == 3 && ack.seqNum == end.seqNum) {
-            logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
-            logf.flush();
-            break;
+        if (n >= static_cast<ssize_t>(sizeof(PacketHeader))) {
+            // Convert received ACK header from little-endian to host byte order
+            uint32_t* ack_fields = reinterpret_cast<uint32_t*>(&ack);
+            ack.type = le32toh(ack_fields[0]);
+            ack.seqNum = le32toh(ack_fields[1]);
+            ack.length = le32toh(ack_fields[2]);
+            ack.checksum = le32toh(ack_fields[3]);
+            
+            if (ack.type == 3 && ack.seqNum == end.seqNum) {
+                logf << ack.type << " " << ack.seqNum << " " << ack.length << " " << ack.checksum << "\n";
+                logf.flush();
+                break;
+            }
         }
     }
 
