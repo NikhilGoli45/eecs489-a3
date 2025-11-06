@@ -38,3 +38,5 @@ bin/
 # Dependency directories
 _deps/
 
+build/
+testing/
