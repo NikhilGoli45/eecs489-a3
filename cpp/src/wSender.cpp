@@ -21,8 +21,8 @@
 #include <string>
 #include <vector>
 
-#include "PacketHeader.hpp"
-#include "Crc32.hpp"
+#include "common/PacketHeader.hpp"
+#include "common/Crc32.hpp"
 
 #include <cxxopts.hpp>
 #include <spdlog/spdlog.h>
