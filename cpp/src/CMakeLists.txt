@@ -14,10 +14,10 @@ cmake_minimum_required(VERSION 3.28)
 
 # Add the executable for wSender
 add_executable(wSender)
-target_sources(wSender PRIVATE wSender.cpp sockets.cpp)
+target_sources(wSender PRIVATE wSender.cpp)
 
 # Headers in common
-target_include_directories(wSender PRIVATE ../${CMAKE_CURRENT_SOURCE_DIR}/common)
+target_include_directories(wSender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/common)
 
 #link deps fetched in top-level CMakeLists.txt
 target_link_libraries(wSender PRIVATE spdlog::spdlog cxxopts::cxxopts)
