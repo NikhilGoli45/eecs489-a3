@@ -116,7 +116,15 @@ ssize_t sendPacket(int sockfd,
                    const uint8_t* data,
                    size_t len) {
     std::vector<uint8_t> buf(HEADER_SIZE + len);
-    std::memcpy(buf.data(), &hdr, HEADER_SIZE);
+    
+    // Convert header fields to network byte order before sending
+    PacketHeader network_hdr;
+    network_hdr.type     = htonl(hdr.type);
+    network_hdr.seqNum   = htonl(hdr.seqNum);
+    network_hdr.length   = htonl(hdr.length);
+    network_hdr.checksum = htonl(hdr.checksum);
+    
+    std::memcpy(buf.data(), &network_hdr, HEADER_SIZE);
     if (len > 0 && data) {
         std::memcpy(buf.data() + HEADER_SIZE, data, len);
     }
@@ -133,7 +141,15 @@ bool recvHeader(int sockfd, PacketHeader& outHdr, sockaddr_in& from) {
         spdlog::debug("Dropped malformed packet: n={} (< header {})", n, HEADER_SIZE);
         return false;
     }
-    std::memcpy(&outHdr, buf.data(), HEADER_SIZE);
+    
+    // Convert header fields from network byte order to host byte order
+    PacketHeader network_hdr;
+    std::memcpy(&network_hdr, buf.data(), HEADER_SIZE);
+    outHdr.type     = ntohl(network_hdr.type);
+    outHdr.seqNum   = ntohl(network_hdr.seqNum);
+    outHdr.length   = ntohl(network_hdr.length);
+    outHdr.checksum = ntohl(network_hdr.checksum);
+    
     return true;
 }
 
