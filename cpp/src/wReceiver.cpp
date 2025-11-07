@@ -1,4 +1,4 @@
-// wReceiver.cpp  (base: cumulative ACKs)
+// wReceiver.cpp  — Base (non-opt) Go-Back-N receiver: cumulative ACKs, no buffering.
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -12,7 +12,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -23,15 +22,15 @@
 namespace fs = std::filesystem;
 
 // Ethernet MTU 1500, IP 20, UDP 8
-static constexpr size_t kMaxUDPPayload = 1500 - 20 - 8;                 // 1472
-static constexpr size_t kHeaderSize    = sizeof(PacketHeader);          // 16
-static constexpr size_t kMaxDataBytes  = kMaxUDPPayload - kHeaderSize;  // 1456
+static constexpr size_t kMaxUDPPayload = 1500 - 20 - 8;              // 1472
+static constexpr size_t kHeaderSize    = sizeof(PacketHeader);       // 16
+static constexpr size_t kMaxDataBytes  = kMaxUDPPayload - kHeaderSize; // 1456
 
 struct Args {
-    uint16_t port = 0;
-    uint32_t window = 0;
-    fs::path out_dir;
-    fs::path log_path;
+    uint16_t    port      = 0;
+    uint32_t    window    = 0;
+    fs::path    out_dir;
+    fs::path    log_path;
 };
 
 static void usage(const char* prog) {
@@ -51,7 +50,7 @@ static bool parse_args(int argc, char** argv, Args& a) {
         } else if ((f == "-o" || f == "--output-log") && i + 1 < argc) {
             a.log_path = fs::path(argv[++i]);
         } else {
-            // ignore unknown tokens to be forgiving
+            // ignore unknown tokens to match autograder's "exact args" note
         }
     }
     if (a.port == 0 || a.window == 0 || a.out_dir.empty() || a.log_path.empty()) {
@@ -66,26 +65,24 @@ struct Logger {
     explicit Logger(const fs::path& p) : out(p, std::ios::out | std::ios::app) {
         if (!out) throw std::runtime_error("Failed to open log file: " + p.string());
     }
-    inline void log(const PacketHeader& h_host) {
-        out << h_host.type << ' ' << h_host.seqNum << ' ' << h_host.length << ' ' << h_host.checksum << '\n';
-        out.flush();
-    }
     inline void log_numeric(uint32_t type, uint32_t seq, uint32_t len, uint32_t cksum) {
         out << type << ' ' << seq << ' ' << len << ' ' << cksum << '\n';
         out.flush();
+    }
+    inline void log_header_host(const PacketHeader& h) {
+        log_numeric(h.type, h.seqNum, h.length, h.checksum);
     }
 };
 
 struct Peer { in_addr addr{}; uint16_t port{}; };
 
 struct ReceiverState {
-    bool have_peer = false;
-    Peer peer{};
-    uint32_t start_seq = 0;                         // START seq for this connection
-    uint32_t next_expected = 0;                     // cumulative ACK point (N)
-    std::map<uint32_t, std::vector<uint8_t>> buffer; // out-of-order data within window
+    bool      have_peer     = false;
+    Peer      peer{};
+    uint32_t  start_seq     = 0;   // START seq for this connection
+    uint32_t  next_expected = 0;   // N (cumulative ACK point)
     std::ofstream outfile;
-    size_t file_index = 0;
+    size_t    file_index    = 0;
 };
 
 // ---------- Byte order helpers ----------
@@ -115,26 +112,30 @@ static int setup_socket(uint16_t port) {
     int s = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0) { perror("socket"); std::exit(1); }
     sockaddr_in addr{};
-    addr.sin_family = AF_INET;
+    addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-    if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) { perror("bind"); std::exit(1); }
+    addr.sin_port        = htons(port);
+    if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        perror("bind");
+        std::exit(1);
+    }
     return s;
 }
 
 static void send_ack(int sock, const sockaddr_in& to, uint32_t ack_seq_host, Logger& logger) {
-    // Log host-order values
+    // Log host-order values (spec logging)
     logger.log_numeric(3u, ack_seq_host, 0u, 0u);
     // Send network-order header
     PacketHeader host{};
     host.type = 3u; host.seqNum = ack_seq_host; host.length = 0u; host.checksum = 0u;
     PacketHeader net = hton_header(host);
-    (void)::sendto(sock, &net, sizeof(net), 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+    (void)::sendto(sock, &net, sizeof(net), 0,
+                   reinterpret_cast<const sockaddr*>(&to), sizeof(to));
 }
 
 static void open_output_file(ReceiverState& st, const Args& args) {
     std::error_code ec;
-    fs::create_directories(args.out_dir, ec);
+    fs::create_directories(args.out_dir, ec); // ok if exists
     fs::path out_path = args.out_dir / ("FILE-" + std::to_string(st.file_index) + ".out");
     st.outfile.open(out_path, std::ios::binary | std::ios::out | std::ios::trunc);
     if (!st.outfile) {
@@ -142,21 +143,23 @@ static void open_output_file(ReceiverState& st, const Args& args) {
     }
 }
 
-static void begin_new_connection(ReceiverState& st, const sockaddr_in& from, const PacketHeader& start_host, const Args& args) {
-    st.peer.addr = from.sin_addr;
-    st.peer.port = ntohs(from.sin_port);
-    st.have_peer = true;
-    st.start_seq = start_host.seqNum;
-    st.next_expected = 0;  // DATA starts from 0 per spec
-    st.buffer.clear();
+static void begin_new_connection(ReceiverState& st,
+                                 const sockaddr_in& from,
+                                 const PacketHeader& start_host,
+                                 const Args& args) {
+    st.peer.addr    = from.sin_addr;
+    st.peer.port    = ntohs(from.sin_port);
+    st.have_peer    = true;
+    st.start_seq    = start_host.seqNum;
+    st.next_expected= 0;  // DATA starts at 0 in spec
+    if (st.outfile.is_open()) st.outfile.close();
     open_output_file(st, args);
 }
 
 static void finish_connection(ReceiverState& st) {
     if (st.outfile.is_open()) { st.outfile.flush(); st.outfile.close(); }
-    st.buffer.clear();
-    st.have_peer = false;
-    st.start_seq = 0;
+    st.have_peer     = false;
+    st.start_seq     = 0;
     st.next_expected = 0;
     ++st.file_index;
 }
@@ -167,53 +170,45 @@ static inline void write_chunk(ReceiverState& st, const uint8_t* data, size_t le
     }
 }
 
-static void handle_data(int sock, const sockaddr_in& from, const PacketHeader& h, const uint8_t* payload,
-                        size_t len, ReceiverState& st, const Args& args, Logger& logger)
+// --------- Base (non-opt) GBN data handling: NO buffering, cumulative ACKs ---------
+static void handle_data(int sock, const sockaddr_in& from, const PacketHeader& h,
+                        const uint8_t* payload, size_t len,
+                        ReceiverState& st, const Args& args, Logger& logger)
 {
     const uint32_t seq = h.seqNum;
     const uint32_t W   = args.window;
+    const uint32_t N   = st.next_expected;
 
-    // Enforce window: drop >= N+W, but still send cumulative ACK to help sender progress
-    if (seq >= st.next_expected + W) {
-        send_ack(sock, from, st.next_expected, logger);
+    // Out-of-window: seq >= N + W → drop, ACK(N)
+    if (seq >= N + W) {
+        send_ack(sock, from, N, logger);
         return;
     }
 
-    if (seq < st.next_expected) {
-        // Duplicate/old: do not rewrite, but send cumulative ACK(N)
-        send_ack(sock, from, st.next_expected, logger);
+    if (seq < N) {
+        // Duplicate/old → ACK(N)
+        send_ack(sock, from, N, logger);
         return;
     }
 
-    if (seq == st.next_expected) {
-        // In-order: write and advance
+    if (seq == N) {
+        // In-order → deliver, advance, ACK(new N)
         write_chunk(st, payload, len);
-        ++st.next_expected;
-        // Flush contiguous buffered data
-        for (;;) {
-            auto it = st.buffer.find(st.next_expected);
-            if (it == st.buffer.end()) break;
-            write_chunk(st, it->second.data(), it->second.size());
-            st.buffer.erase(it);
-            ++st.next_expected;
-        }
-        // Cumulative ACK (next expected)
+        st.next_expected = N + 1;
         send_ack(sock, from, st.next_expected, logger);
         return;
     }
 
-    // Out-of-order within window: buffer (first occurrence), ACK cumulative N
-    if (st.buffer.find(seq) == st.buffer.end()) {
-        st.buffer.emplace(seq, std::vector<uint8_t>(payload, payload + len));
-    }
-    send_ack(sock, from, st.next_expected, logger);
+    // In-window but out-of-order (N < seq < N+W) — BASE RECEIVER DOES NOT BUFFER.
+    // Just ACK(N) to trigger Go-Back-N retransmission of the missing packet.
+    send_ack(sock, from, N, logger);
 }
 
 int main(int argc, char** argv) {
     Args args;
     if (!parse_args(argc, argv, args)) return 1;
 
-    // Ensure log parent directory exists (prevents exit=1 on autograder)
+    // Ensure log parent dir exists to avoid open failures on grader
     if (!args.log_path.parent_path().empty()) {
         std::error_code ec;
         fs::create_directories(args.log_path.parent_path(), ec);
@@ -261,9 +256,9 @@ int main(int argc, char** argv) {
             }
 
             // Log well-formed received packet
-            logger.log(h);
+            logger.log_header_host(h);
 
-            // No active peer yet: only accept START to begin
+            // If idle: only accept START to begin a connection
             if (!st.have_peer) {
                 if (h.type == 0u) { // START
                     begin_new_connection(st, from, h, args);
@@ -276,14 +271,12 @@ int main(int argc, char** argv) {
             // Active connection: ignore other peers
             if (!same_peer(from, st.peer)) continue;
 
-            // Handle types
             switch (h.type) {
                 case 0u:  // START mid-connection
-                    // If it's a duplicate START for this connection, re-ACK to avoid deadlock
+                    // Re-ACK if duplicate START for this connection, ignore otherwise
                     if (h.seqNum == st.start_seq) {
                         send_ack(sock, from, h.seqNum, logger);
                     }
-                    // Else ignore new-connection attempts
                     break;
 
                 case 2u:  // DATA
@@ -296,7 +289,7 @@ int main(int argc, char** argv) {
                     finish_connection(st);
                     break;
 
-                case 3u:  // ACK (receiver ignores)
+                case 3u:  // ACK — receiver ignores
                 default:
                     break;
             }
