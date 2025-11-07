@@ -40,3 +40,4 @@ _deps/
 
 build/
 testing/
+__pycache__/
