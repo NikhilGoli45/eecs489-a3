@@ -38,3 +38,6 @@ bin/
 # Dependency directories
 _deps/
 
+build/
+testing/
+__pycache__/
