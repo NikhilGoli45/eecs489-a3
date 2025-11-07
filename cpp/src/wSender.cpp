@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <random>
 #include <string>
 #include <vector>
@@ -67,14 +68,14 @@ Args parseArgs(int argc, char** argv) {
     auto result = options.parse(argc, argv);
 
     if (result.count("help")) {
-        fmt::print("{}\n", options.help());
+        std::cout << options.help() << '\n';
         std::exit(0);
     }
 
     Args args{};
     if (!result.count("hostname") || !result.count("port") ||
         !result.count("input-file") || !result.count("output-log")) {
-        fmt::print(stderr, "Missing required arguments.\n{}\n", options.help());
+        std::cerr << "Missing required arguments.\n" << options.help() << '\n';
         std::exit(1);
     }
 
@@ -86,11 +87,11 @@ Args parseArgs(int argc, char** argv) {
     args.verbose   = result["verbose"].as<bool>();
 
     if (args.window <= 0) {
-        fmt::print(stderr, "window-size must be positive\n");
+        std::cerr << "window-size must be positive\n";
         std::exit(1);
     }
     if (args.port == 0) {
-        fmt::print(stderr, "port must be nonzero\n");
+        std::cerr << "port must be nonzero\n";
         std::exit(1);
     }
     return args;
