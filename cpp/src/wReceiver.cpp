@@ -50,7 +50,7 @@ static bool parse_args(int argc, char** argv, Args& a) {
         } else if ((f == "-o" || f == "--output-log") && i + 1 < argc) {
             a.log_path = fs::path(argv[++i]);
         } else {
-            // ignore unknown tokens to match autograder's "exact args" note
+            // ignore
         }
     }
     if (a.port == 0 || a.window == 0 || a.out_dir.empty() || a.log_path.empty()) {
@@ -181,7 +181,7 @@ static void handle_data(int sock, const sockaddr_in& from, const PacketHeader& h
 
     // Out-of-window: seq >= N + W → drop, ACK(N)
     if (seq >= N + W) {
-        send_ack(sock, from, N, logger);
+        // no ack
         return;
     }
 
